@@ -1,0 +1,10 @@
+{
+  "name": "pastebin-monster",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter @pastebin/web dev",
+    "dev:server": "pnpm --filter @pastebin/server dev",
+    "build:web": "pnpm --filter @pastebin/web build",
+    "build:server": "pnpm --filter @pastebin/server build"
+  }
+}
