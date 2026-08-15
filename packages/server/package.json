@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "tsc && node scripts/copy-migrations.js",
     "start": "node dist/server.js"
   },
   "dependencies": {

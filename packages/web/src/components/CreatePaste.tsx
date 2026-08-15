@@ -1,32 +1,137 @@
-import { useState } from 'react';
-import { createPaste } from '../api/client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createImagePaste, createPaste, PasteError } from '../api/client';
 
 const MAX_LENGTH = 50000;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 type Status = 'idle' | 'submitting' | 'done';
 
+interface PendingImage {
+  blob: Blob;
+  url: string;
+  width: number;
+  height: number;
+}
+
+function formatBytes(bytes: number): string {
+  return bytes < 1024 * 1024
+    ? `${Math.round(bytes / 1024)} KB`
+    : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export default function CreatePaste() {
   const [content, setContent] = useState('');
+  const [image, setImage] = useState<PendingImage | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<Status>('idle');
   const [slug, setSlug] = useState('');
   const [error, setError] = useState('');
   const [copied, setCopied] = useState<'link' | 'slug' | null>(null);
+  const objectUrlRef = useRef<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const releaseObjectUrl = useCallback(() => {
+    if (objectUrlRef.current) {
+      URL.revokeObjectURL(objectUrlRef.current);
+      objectUrlRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => releaseObjectUrl, [releaseObjectUrl]);
+
+  const acceptImage = useCallback(
+    async (blob: Blob) => {
+      if (blob.type !== 'image/png') {
+        setError('Only PNG images are supported');
+        return;
+      }
+      if (blob.size > MAX_IMAGE_BYTES) {
+        setError(`That image is ${formatBytes(blob.size)}. The limit is 5 MB.`);
+        return;
+      }
+
+      let bitmap: ImageBitmap;
+      try {
+        bitmap = await createImageBitmap(blob);
+      } catch {
+        setError("That PNG couldn't be read");
+        return;
+      }
+
+      releaseObjectUrl();
+      objectUrlRef.current = URL.createObjectURL(blob);
+      setImage({ blob, url: objectUrlRef.current, width: bitmap.width, height: bitmap.height });
+      bitmap.close();
+      setError('');
+    },
+    [releaseObjectUrl],
+  );
+
+  // Bound to the window, not the textarea: the real flow is screenshot →
+  // alt-tab back to the browser → Ctrl+V, and nothing is focused at that point.
+  useEffect(() => {
+    if (status !== 'idle') return;
+
+    function onPaste(event: ClipboardEvent) {
+      const items = event.clipboardData?.items;
+      if (!items) return;
+
+      for (const item of items) {
+        if (item.kind === 'file' && item.type === 'image/png') {
+          const file = item.getAsFile();
+          if (file) {
+            event.preventDefault();
+            void acceptImage(file);
+          }
+          return;
+        }
+      }
+    }
+
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [status, acceptImage]);
+
+  function clearImage() {
+    releaseObjectUrl();
+    setImage(null);
+    setError('');
+  }
+
+  function handleDrop(event: React.DragEvent) {
+    event.preventDefault();
+    setDragging(false);
+    const file = event.dataTransfer.files[0];
+    if (file) void acceptImage(file);
+  }
+
+  function handleDragLeave(event: React.DragEvent) {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDragging(false);
+    }
+  }
 
   async function handleSubmit() {
-    if (!content.trim()) return;
+    if (!image && !content.trim()) return;
     setStatus('submitting');
     setError('');
     try {
-      const result = await createPaste(content);
+      const result = image ? await createImagePaste(image.blob) : await createPaste(content);
       setSlug(result.slug);
       setStatus('done');
-    } catch {
-      setError('Could not create paste. Try again.');
+    } catch (err) {
+      setError(
+        err instanceof PasteError && err.status === 413
+          ? 'That image is over the 5 MB limit'
+          : 'Could not create paste. Try again.',
+      );
       setStatus('idle');
     }
   }
 
   function handleReset() {
+    releaseObjectUrl();
+    setImage(null);
     setContent('');
     setSlug('');
     setError('');
@@ -64,28 +169,75 @@ export default function CreatePaste() {
   }
 
   return (
-    <div className="page page-create">
-      <textarea
-        className="paste-input"
-        placeholder="Paste text, code, or anything you need to transfer"
-        value={content}
-        onChange={(e) => setContent(e.target.value.slice(0, MAX_LENGTH))}
-        disabled={status === 'submitting'}
-        autoFocus
-      />
+    <div
+      className={`page page-create${dragging ? ' page-dragging' : ''}`}
+      onDragOver={(e) => {
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {image ? (
+        <div className="image-preview">
+          <img className="image-preview-thumb" src={image.url} alt="Pasted screenshot" />
+          <button
+            type="button"
+            className="image-preview-clear"
+            onClick={clearImage}
+            disabled={status === 'submitting'}
+            aria-label="Remove image"
+          >
+            ×
+          </button>
+        </div>
+      ) : (
+        <textarea
+          className="paste-input"
+          placeholder="Paste text, code, or a PNG screenshot"
+          value={content}
+          onChange={(e) => setContent(e.target.value.slice(0, MAX_LENGTH))}
+          disabled={status === 'submitting'}
+          autoFocus
+        />
+      )}
       <div className="create-footer">
         <span className="char-counter">
-          {content.length} / {MAX_LENGTH}
+          {image ? (
+            `PNG · ${image.width}×${image.height} · ${formatBytes(image.blob.size)}`
+          ) : (
+            <>
+              {content.length} / {MAX_LENGTH} ·{' '}
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                attach a PNG
+              </button>
+            </>
+          )}
         </span>
         <button
           type="button"
           className="btn btn-accent"
           onClick={handleSubmit}
-          disabled={status === 'submitting' || !content.trim()}
+          disabled={status === 'submitting' || (!image && !content.trim())}
         >
           {status === 'submitting' ? 'Creating...' : 'Create paste'}
         </button>
       </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/png"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void acceptImage(file);
+          e.target.value = '';
+        }}
+      />
       {error && <p className="error-message">{error}</p>}
     </div>
   );

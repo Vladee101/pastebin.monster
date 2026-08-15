@@ -3,7 +3,10 @@ import { db } from './db/client';
 import { registerPasteRoutes } from './routes/pastes';
 import { startCleanupSweep } from './lib/cleanup';
 
-const server = Fastify();
+// Headroom above the 5 MB image cap so the route's own 413 fires with a
+// message that explains the limit, instead of Fastify's generic body-limit
+// rejection at its 1 MB default.
+const server = Fastify({ bodyLimit: 6 * 1024 * 1024 });
 
 server.get('/health', async () => {
   return { status: 'ok' };
